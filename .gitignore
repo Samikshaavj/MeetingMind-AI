@@ -1,0 +1,18 @@
+# Environments
+.env
+.env.local
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+dist/
+.DS_Store
+
+# Uploads and Temp Files
+*.mp4
+*.mp3
