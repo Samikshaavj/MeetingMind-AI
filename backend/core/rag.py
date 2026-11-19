@@ -1,15 +1,40 @@
+import os
 import json
+import httpx
 from typing import List, Optional
 from sqlalchemy.orm import Session
-from fastembed import TextEmbedding
 from database.models import Meeting, MeetingChunk
 
-# Loads a fast, lightweight 384-dim embedding model locally (downloads once on first run)
-embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-small-en-v1.5/pipeline/feature-extraction"
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+
+
+def get_embeddings(texts: List[str]) -> List[List[float]]:
+    """Generates 384-dim embeddings via Hugging Face's free Inference API."""
+    if not texts:
+        return []
+
+    headers = {"Content-Type": "application/json"}
+    if HF_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_TOKEN}"
+
+    response = httpx.post(
+        HF_API_URL,
+        headers=headers,
+        json={"inputs": texts, "options": {"wait_for_model": True}},
+        timeout=60.0,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    # Ensure output is always List[List[float]]
+    if data and isinstance(data[0], float):
+        return [data]
+    return data
 
 
 def get_embedding(text: str) -> List[float]:
-    return list(embedding_model.embed([text]))[0].tolist()
+    return get_embeddings([text])[0]
 
 
 def chunk_transcript(transcript: str, lines_per_chunk: int = 6, overlap: int = 1) -> List[str]:
@@ -32,7 +57,6 @@ def chunk_transcript(transcript: str, lines_per_chunk: int = 6, overlap: int = 1
 
 def index_meeting_chunks(db: Session, meeting: Meeting):
     """Chunks a meeting's summary, action items, and transcript, then stores embeddings in pgvector."""
-    # Clear old chunks if re-indexing
     db.query(MeetingChunk).filter(MeetingChunk.meeting_id == meeting.id).delete()
 
     raw_chunks = []
@@ -49,8 +73,8 @@ def index_meeting_chunks(db: Session, meeting: Meeting):
     for seg in chunk_transcript(meeting.transcript or ""):
         raw_chunks.append(f"[Meeting #{meeting.id} - {meeting.title or 'Uploaded Meeting'}]\n{seg}")
 
-    # Batch-generate embeddings
-    vectors = [v.tolist() for v in embedding_model.embed(raw_chunks)]
+    # Batch-generate embeddings via API
+    vectors = get_embeddings(raw_chunks)
 
     for idx, (text, vec) in enumerate(zip(raw_chunks, vectors)):
         db.add(

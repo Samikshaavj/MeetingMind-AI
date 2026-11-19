@@ -14,4 +14,4 @@ bcrypt
 pyjwt
 passlib
 psycopg[binary]
-fastembed
+httpx
