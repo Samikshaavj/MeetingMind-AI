@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
 import { Calendar, Video, UploadCloud, Loader2, AlertTriangle, CheckCircle2, Check, Circle } from 'lucide-react'
+import ChatAssistant from './ChatAssistant'
 
 function App() {
   const [meetings, setMeetings] = useState([])
@@ -328,6 +329,9 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Floating Conversational Meeting Assistant */}
+      <ChatAssistant meetings={meetings} />
     </div>
   )
 }

@@ -101,3 +101,46 @@ def analyze_meeting_video(file_path: str):
         action_items=normalized_items,
         transcript=timestamped_transcript
     )
+def chat_with_meetings(question: str, meetings_data: list, history: list):
+    # Build structured context from the selected meeting(s)
+    context_blocks = []
+    for m in meetings_data:
+        block = (
+            f"=== MEETING #{m['id']}: {m['title']} (Date: {m['created_at']}) ===\n"
+            f"SUMMARY:\n{m['summary']}\n\n"
+            f"ACTION ITEMS:\n{json.dumps(m['action_items'])}\n\n"
+            f"TIMESTAMPED TRANSCRIPT:\n{m['transcript'] or 'No transcript available.'}\n"
+        )
+        context_blocks.append(block)
+
+    full_context = "\n\n".join(context_blocks)
+
+    system_prompt = f"""
+    You are MeetingMind AI, a Conversational Meeting Assistant.
+    Answer the user's question using ONLY the meeting data provided below.
+
+    RULES:
+    1. Always cite exact transcript timestamps (e.g., [00:12 - 00:18]) and the Meeting #/Title when referencing what was said.
+    2. If the user asks to compare decisions or tasks across meetings, clearly compare them side-by-side by Meeting # and date.
+    3. Use the conversation history to understand follow-up questions (like "what about her deadline?" or "compare that with the first one").
+    4. If the answer is not in the provided meetings, say so clearly—do not hallucinate.
+
+    MEETING DATA:
+    {full_context}
+    """
+
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Append recent chat history for follow-up context (last 10 messages)
+    for msg in history[-10:]:
+        if msg.get("role") in ("user", "assistant") and msg.get("content"):
+            messages.append({"role": msg["role"], "content": msg["content"]})
+
+    messages.append({"role": "user", "content": question})
+
+    chat_completion = groq_client.chat.completions.create(
+        messages=messages,
+        model="openai/gpt-oss-20b"
+    )
+
+    return chat_completion.choices[0].message.content
