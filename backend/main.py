@@ -1,20 +1,17 @@
 import shutil
-from fastapi import FastAPI, Depends, File, UploadFile
-from sqlalchemy.orm import Session
-from database.connection import get_db
-from database.models import Meeting
-from fastapi import FastAPI
+from pathlib import Path
+from fastapi import FastAPI, Depends, File, UploadFile, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pathlib import Path
-from core.tasks import process_video_task
-
-
+from sqlalchemy.orm import Session
+from database.connection import get_db
+from database.models import Meeting
+from core.tasks import process_video_task, send_task_notification_email
 
 app = FastAPI(title="MeetingMind AI")
 
-# --- NEW: CORS Configuration ---
+# --- CORS Configuration ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], # Allows your React app to fetch data
@@ -23,24 +20,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 @app.get("/api/health")
 def health_check():
     return {"status": "MeetingMind AI Engine is active!"}
-
-
-@app.get("/api/health")
-def health_check():
-    return {"status": "MeetingMind AI Engine is active!"}
-
 
 @app.post("/api/upload-video")
 async def upload_video(file: UploadFile = File(...)):
@@ -57,7 +39,7 @@ async def upload_video(file: UploadFile = File(...)):
         "message": "Video uploaded and queued for processing!", 
         "task_id": task.id
     }
-# --- NEW CELERY TEST ROUTE GOES HERE ---
+
 @app.post("/api/test-queue")
 def test_celery_queue():
     # The .delay() function sends the task to Redis
@@ -67,15 +49,33 @@ def test_celery_queue():
         "message": "Video sent to background queue!", 
         "task_id": task.id
     }
+
 @app.get("/api/meetings")
 def get_all_meetings(db: Session = Depends(get_db)):
     # Fetch all meetings from the database, newest first
     meetings = db.query(Meeting).order_by(Meeting.created_at.desc()).all()
     return {"meetings": meetings}
-# --- EXPLICIT DIRECTORY STEPPING ---
-# 1. Get the exact folder this main.py file is in (.../backend)
-backend_dir = Path(__file__).resolve().parent
-# --- EXPLICIT DIRECTORY STEPPING ---
+
+# --- NEW: Action Item Agent Endpoints ---
+
+@app.put("/api/meetings/{meeting_id}/action_items")
+def update_action_items(meeting_id: int, updated_items: list = Body(...), db: Session = Depends(get_db)):
+    meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
+    if not meeting:
+        return {"error": "Meeting not found"}
+    
+    # Overwrite the JSON column with the frontend's edits
+    meeting.action_items = updated_items
+    db.commit()
+    return {"message": "Tasks updated successfully"}
+
+@app.post("/api/tasks/notify")
+def trigger_task_notification(owner_email: str = Body(...), task_data: dict = Body(...)):
+    # Send the email job to the background worker
+    send_task_notification_email.delay(owner_email, task_data)
+    return {"message": "Notification queued"}
+
+# --- EXPLICIT DIRECTORY STEPPING (Static File Serving) ---
 # 1. Get the exact folder this main.py file is in (.../backend)
 backend_dir = Path(__file__).resolve().parent
 

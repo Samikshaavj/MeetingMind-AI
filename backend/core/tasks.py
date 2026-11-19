@@ -1,4 +1,6 @@
 import os
+import smtplib
+from email.message import EmailMessage
 from moviepy import VideoFileClip
 
 # Import your Celery instance and AI function
@@ -32,7 +34,8 @@ def process_video_task(self, file_path: str):
         new_meeting = Meeting(
             title="Uploaded Meeting", 
             summary=ai_result.summary,
-            action_items=ai_result.action_items
+            action_items=ai_result.action_items,
+            transcript=ai_result.transcript # Save it to the database
         )
         db.add(new_meeting)
         db.commit()
@@ -60,3 +63,42 @@ def process_video_task(self, file_path: str):
                 os.remove(file_path)
             if os.path.exists(audio_path):
                 os.remove(audio_path)
+
+# ---------------------------------------------------------
+# NEW: Action Item Notification Email Task
+# ---------------------------------------------------------
+@celery_engine.task
+def send_task_notification_email(recipient_email: str, task_data: dict):
+    print(f"[EmailWorker] Preparing to send task assignment to {recipient_email}")
+    msg = EmailMessage()
+    msg['Subject'] = f"Action Item Assigned: {task_data.get('task', 'New Task')}"
+    
+    # Securely load credentials from your .env file
+    sender_email = os.getenv("SENDER_EMAIL", "your_email@gmail.com")
+    app_password = os.getenv("EMAIL_APP_PASSWORD", "YOUR_APP_PASSWORD")
+    
+    msg['From'] = sender_email
+    msg['To'] = recipient_email
+    
+    body = f"""
+    You have a new action item assigned from the recent meeting.
+    
+    Task: {task_data.get('task', 'N/A')}
+    Deadline: {task_data.get('deadline', 'N/A')}
+    Priority: {task_data.get('priority', 'N/A')}
+    
+    Please log into MeetingMind AI to review or update your task status.
+    """
+    msg.set_content(body)
+    
+    try:
+        # Connect to Gmail SMTP server
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(sender_email, app_password)
+            server.send_message(msg)
+            
+        print(f"[EmailWorker] Successfully sent email to {recipient_email}")
+        return "Email sent successfully"
+    except Exception as e:
+        print(f"[EmailWorker] Failed to send email: {e}")
+        return f"Failed to send email: {str(e)}"

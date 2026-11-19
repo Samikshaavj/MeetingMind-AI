@@ -14,29 +14,54 @@ if not groq_key:
 groq_client = Groq(api_key=groq_key)
 
 class AIResult:
-    def __init__(self, summary, action_items):
+    def __init__(self, summary, action_items, transcript):
         self.summary = summary
         self.action_items = action_items
+        self.transcript = transcript
 
 def analyze_meeting_video(file_path: str):
     print(f"\n[AI] Sending {file_path} to Groq Whisper for transcription...")
     
-    # 1. Transcribe the MP3 using Groq Whisper
+    # 1. Transcribe the MP3 using Groq Whisper with verbose_json for timestamps
     with open(file_path, "rb") as audio_file:
         transcription = groq_client.audio.transcriptions.create(
             file=(os.path.basename(file_path), audio_file.read()),
             model="whisper-large-v3",
+            response_format="verbose_json"
         )
         
     transcript_text = transcription.text
-    print("[AI] Groq transcription complete! Generating summary with Groq Llama-3...")
     
-    # 2. Pass the text to Groq's Llama-3 for lightning-fast JSON generation
+    # 2. Build the timestamped transcript string from the audio segments
+    timestamped_transcript = ""
+    for segment in transcription.segments:
+        start_sec = int(segment.start if hasattr(segment, 'start') else segment['start'])
+        end_sec = int(segment.end if hasattr(segment, 'end') else segment['end'])
+        
+        start_m, start_s = divmod(start_sec, 60)
+        end_m, end_s = divmod(end_sec, 60)
+        
+        time_block = f"[{start_m:02d}:{start_s:02d} - {end_m:02d}:{end_s:02d}]"
+        text_block = segment.text.strip() if hasattr(segment, 'text') else segment['text'].strip()
+        
+        timestamped_transcript += f"{time_block} {text_block}\n"
+        
+    print("[AI] Groq transcription complete! Generating summary...")
+    
+    # 3. Pass the text for Action Item Agent JSON generation
     prompt = f"""
     Analyze this meeting transcript and output ONLY a valid JSON object with two exact keys:
     1. "summary": A detailed text summary of what was discussed.
-    2. "action_items": A list of tasks assigned, who they are assigned to, and deadlines.
+    2. "action_items": An array of task objects based on commitments in the transcript.
     
+    For each task in "action_items", you must use these exact keys:
+    - "task": The core action to be taken.
+    - "owner": The name of the person assigned (or "Unassigned").
+    - "deadline": The specific date/time mentioned (or "None").
+    - "priority": "High", "Medium", or "Low" based on the urgency context.
+    - "is_ambiguous": true or false (true if the deadline or owner is unclear).
+    - "approved": false (default value for all tasks).
+
     TRANSCRIPT:
     {transcript_text}
     """
@@ -46,17 +71,33 @@ def analyze_meeting_video(file_path: str):
             {"role": "system", "content": "You are an elite executive assistant. You output ONLY valid JSON."},
             {"role": "user", "content": prompt}
         ],
-       model="openai/gpt-oss-20b", # Groq's fastest model
-        response_format={"type": "json_object"} # Forces perfect JSON output
+        model="openai/gpt-oss-20b", 
+        response_format={"type": "json_object"} 
     )
     
     print("[AI] Groq summary generated! Parsing data...")
     
-    # 3. Parse the JSON
+    # 4. Parse and normalize the JSON so keys always match the React UI
     clean_text = chat_completion.choices[0].message.content
     data = json.loads(clean_text)
+
+    normalized_items = []
+    for item in data.get("action_items", []):
+        if isinstance(item, dict):
+            owner = item.get("owner") or item.get("assigned_to") or item.get("assignee") or "Unassigned"
+            deadline = item.get("deadline") or item.get("due_date") or "None"
+            normalized_items.append({
+                "task": item.get("task") or item.get("description") or "",
+                "owner": owner,
+                "deadline": deadline,
+                "priority": item.get("priority", "Medium"),
+                "is_ambiguous": item.get("is_ambiguous", owner == "Unassigned" or deadline == "None"),
+                "approved": False,
+                "completed": False
+            })
     
     return AIResult(
         summary=data.get("summary", "No summary generated."),
-        action_items=data.get("action_items", [])
+        action_items=normalized_items,
+        transcript=timestamped_transcript
     )
