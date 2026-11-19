@@ -1,5 +1,6 @@
 import os
 import json
+from core.tools import AGENT_TOOLS, run_tool
 from groq import Groq
 from dotenv import load_dotenv
 
@@ -101,32 +102,29 @@ def analyze_meeting_video(file_path: str):
         action_items=normalized_items,
         transcript=timestamped_transcript
     )
-def chat_with_meetings(question: str, meetings_data: list, history: list):
-    # Build structured context from the selected meeting(s)
-    context_blocks = []
-    for m in meetings_data:
-        block = (
-            f"=== MEETING #{m['id']}: {m['title']} (Date: {m['created_at']}) ===\n"
-            f"SUMMARY:\n{m['summary']}\n\n"
-            f"ACTION ITEMS:\n{json.dumps(m['action_items'])}\n\n"
-            f"TIMESTAMPED TRANSCRIPT:\n{m['transcript'] or 'No transcript available.'}\n"
-        )
-        context_blocks.append(block)
 
-    full_context = "\n\n".join(context_blocks)
+
+def chat_with_meetings(question: str, db, history: list, meeting_id: int = None):
+    scope_note = (
+        f"The user is currently scoped to Meeting #{meeting_id}."
+        if meeting_id
+        else "The user is searching across ALL meetings."
+    )
 
     system_prompt = f"""
-    You are MeetingMind AI, a Conversational Meeting Assistant.
-    Answer the user's question using ONLY the meeting data provided below.
+    You are MeetingMind AI, an Agentic Meeting Intelligence Assistant.
+    {scope_note}
+
+    You have access to three tools:
+    1. `search_transcripts`: Use for semantic questions about what was discussed, decisions, opinions, or exact timestamps.
+    2. `query_tasks`: Use for listing, counting, or filtering action items by owner, priority, approval, or completion status.
+    3. `draft_followup_email`: Use when the user asks to draft or send a follow-up/reminder email. Always look up relevant tasks or transcript details first so the email is accurate.
 
     RULES:
-    1. Always cite exact transcript timestamps (e.g., [00:12 - 00:18]) and the Meeting #/Title when referencing what was said.
-    2. If the user asks to compare decisions or tasks across meetings, clearly compare them side-by-side by Meeting # and date.
-    3. Use the conversation history to understand follow-up questions (like "what about her deadline?" or "compare that with the first one").
-    4. If the answer is not in the provided meetings, say so clearly—do not hallucinate.
-
-    MEETING DATA:
-    {full_context}
+    - Always call the appropriate tool(s) before answering questions about meetings or tasks. You may call multiple tools in sequence.
+    - Always cite exact transcript timestamps (e.g., [00:12 - 00:18]) and Meeting #/Title when referencing transcripts.
+    - When using `draft_followup_email`, NEVER say the email has been sent. Tell the user the draft is ready for their review and approval.
+    - Never hallucinate tasks or quotes that were not returned by a tool.
     """
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -138,9 +136,59 @@ def chat_with_meetings(question: str, meetings_data: list, history: list):
 
     messages.append({"role": "user", "content": question})
 
-    chat_completion = groq_client.chat.completions.create(
-        messages=messages,
-        model="openai/gpt-oss-20b"
-    )
+    pending_email_draft = None
 
-    return chat_completion.choices[0].message.content
+    # Agentic loop (max 4 iterations to prevent infinite tool calls)
+    for _ in range(4):
+        response = groq_client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=messages,
+            tools=AGENT_TOOLS,
+            tool_choice="auto",
+        )
+
+        assistant_msg = response.choices[0].message
+
+        # If the model decided to call one or more tools
+        if assistant_msg.tool_calls:
+            messages.append({
+                "role": "assistant",
+                "content": assistant_msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in assistant_msg.tool_calls
+                ],
+            })
+
+            for tc in assistant_msg.tool_calls:
+                args = json.loads(tc.function.arguments or "{}")
+                print(f"[Agent] Calling tool: {tc.function.name}({args})")
+                tool_result = run_tool(tc.function.name, args, db, default_meeting_id=meeting_id)
+
+                if tc.function.name == "draft_followup_email":
+                    parsed = json.loads(tool_result)
+                    pending_email_draft = parsed.get("draft")
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tool_result,
+                })
+        else:
+            # Final natural-language answer + any pending HITL email draft
+            return {
+                "answer": assistant_msg.content or "I couldn't generate a response.",
+                "email_draft": pending_email_draft,
+            }
+
+    return {
+        "answer": "I reached the maximum tool-calling steps. Please try rephrasing your question.",
+        "email_draft": pending_email_draft,
+    }

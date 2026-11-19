@@ -4,6 +4,16 @@ from pgvector.sqlalchemy import Vector
 from datetime import datetime
 from .connection import Base
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Meeting(Base):
     __tablename__ = "meetings"
 
@@ -27,6 +37,21 @@ class Meeting(Base):
     embedding = Column(Vector(768), nullable=True) 
     
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    chunks = relationship("MeetingChunk", back_populates="meeting", cascade="all, delete-orphan")
+
+
+class MeetingChunk(Base):
+    __tablename__ = "meeting_chunks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    # BAAI/bge-small-en-v1.5 outputs 384-dimensional vectors
+    embedding = Column(Vector(384), nullable=False)
+
+    meeting = relationship("Meeting", back_populates="chunks")
 
 
 class ChatSession(Base):

@@ -1,11 +1,13 @@
 import os
 import smtplib
 from email.message import EmailMessage
+from dotenv import load_dotenv
 from moviepy import VideoFileClip
 
-# Import your Celery instance and AI function
+# Import your Celery instance, AI function, and RAG indexer
 from .celery_app import celery_engine
 from .ai_engine import analyze_meeting_video
+from .rag import index_meeting_chunks
 
 # Import database dependencies
 from database.connection import SessionLocal
@@ -29,19 +31,25 @@ def process_video_task(self, file_path: str):
         # 3. Pass the MP3 to our Groq/Gemini pipeline
         ai_result = analyze_meeting_video(audio_path) 
         
-        # 4. Save to the database
+        # 4. Save to the database and index chunks into pgvector
         db = SessionLocal()
-        new_meeting = Meeting(
-            title="Uploaded Meeting", 
-            summary=ai_result.summary,
-            action_items=ai_result.action_items,
-            transcript=ai_result.transcript # Save it to the database
-        )
-        db.add(new_meeting)
-        db.commit()
-        db.close()
-        
-        print("[AI] Success! Saved in database.")
+        try:
+            new_meeting = Meeting(
+                title="Uploaded Meeting", 
+                summary=ai_result.summary,
+                action_items=ai_result.action_items,
+                transcript=ai_result.transcript
+            )
+            db.add(new_meeting)
+            db.commit()
+            db.refresh(new_meeting)
+
+            # Generate embeddings and store chunks for Vector RAG
+            print(f"[RAG] Indexing chunks for Meeting #{new_meeting.id}...")
+            index_meeting_chunks(db, new_meeting)
+            print("[AI] Success! Saved and indexed in database.")
+        finally:
+            db.close()
         
         # 5. Clean up both files ONLY after a complete success
         if os.path.exists(file_path):
@@ -52,7 +60,7 @@ def process_video_task(self, file_path: str):
     except Exception as e:
         print(f"[AI] Error during processing: {e}")
         
-        # If Gemini is overloaded, retry BUT DO NOT delete the files yet!
+        # If API is overloaded, retry BUT DO NOT delete the files yet!
         if "503" in str(e) or "429" in str(e):
             print("[AI] API is overloaded! Retrying in 50 seconds...")
             raise self.retry(exc=e, countdown=50)
@@ -65,35 +73,47 @@ def process_video_task(self, file_path: str):
                 os.remove(audio_path)
 
 # ---------------------------------------------------------
-# NEW: Action Item Notification Email Task
+# Action Item & HITL Follow-up Email Task
 # ---------------------------------------------------------
 @celery_engine.task
 def send_task_notification_email(recipient_email: str, task_data: dict):
-    print(f"[EmailWorker] Preparing to send task assignment to {recipient_email}")
+    load_dotenv()
+    print(f"[EmailWorker] Preparing to send email to {recipient_email}")
+
+    sender_email = os.getenv("SENDER_EMAIL")
+    app_password = os.getenv("EMAIL_APP_PASSWORD")
+
+    if not sender_email or not app_password:
+        print("[EmailWorker] Missing SENDER_EMAIL or EMAIL_APP_PASSWORD in .env")
+        return "Missing email credentials"
+
     msg = EmailMessage()
-    msg['Subject'] = f"Action Item Assigned: {task_data.get('task', 'New Task')}"
-    
-    # Securely load credentials from your .env file
-    sender_email = os.getenv("SENDER_EMAIL", "your_email@gmail.com")
-    app_password = os.getenv("EMAIL_APP_PASSWORD", "YOUR_APP_PASSWORD")
-    
     msg['From'] = sender_email
     msg['To'] = recipient_email
-    
-    body = f"""
-    You have a new action item assigned from the recent meeting.
-    
-    Task: {task_data.get('task', 'N/A')}
-    Deadline: {task_data.get('deadline', 'N/A')}
-    Priority: {task_data.get('priority', 'N/A')}
-    
-    Please log into MeetingMind AI to review or update your task status.
-    """
+
+    if task_data.get("is_followup"):
+        # Human-in-the-Loop approved follow-up email
+        msg['Subject'] = task_data.get('task', 'Meeting Follow-up')
+        body = task_data.get('description', '')
+    else:
+        # Standard action item assignment notification
+        msg['Subject'] = f"Action Item Assigned: {task_data.get('task', 'New Task')}"
+        body = f"""
+You have a new action item assigned from the recent meeting.
+
+Task: {task_data.get('task', 'N/A')}
+Deadline: {task_data.get('deadline', 'N/A')}
+Priority: {task_data.get('priority', 'N/A')}
+
+Please log into MeetingMind AI to review or update your task status.
+"""
     msg.set_content(body)
     
     try:
-        # Connect to Gmail SMTP server
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
             server.login(sender_email, app_password)
             server.send_message(msg)
             

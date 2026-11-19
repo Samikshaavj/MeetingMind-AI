@@ -18,3 +18,10 @@ dist/
 *.mp3
 
 fix_db.py
+backend/venv/
+backend/.env
+backend/__pycache__/
+meeting-ui/node_modules/
+meeting-ui/dist/
+*.mp4
+*.mp3
